@@ -438,17 +438,17 @@ with col_in:
         st.markdown("<div class='meta-tag'>01 // INGESTION</div>", unsafe_allow_html=True)
 
         if sample_select == "Sample 1: Benign Confounder (Safe with sensitive word)":
-            p_path = "data/img/82403.png"
+            p_path = "app/samples/82403.png" if os.path.exists("app/samples/82403.png") else "data/img/82403.png"
             preset_caption = "everybody loves chocolate chip cookies, even hitler"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
         elif sample_select == "Sample 2: Multimodal Hate (Benign text + hostile image)":
-            p_path = "data/img/08291.png"
+            p_path = "app/samples/08291.png" if os.path.exists("app/samples/08291.png") else "data/img/08291.png"
             preset_caption = "white people is this a shooting range"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
         elif sample_select == "Sample 3: Subtle Threat (Contextual objects)":
-            p_path = "data/img/83745.png"
+            p_path = "app/samples/83745.png" if os.path.exists("app/samples/83745.png") else "data/img/83745.png"
             preset_caption = "it is time.. to send these parasites back to the desert"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
