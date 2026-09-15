@@ -216,17 +216,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
-# Core Engine & Model Caching
-# -----------------------------------------------------------------------------
-@st.cache_resource(show_spinner=False)
-def get_easyocr_reader():
-    try:
-        import easyocr
-        return easyocr.Reader(['en'], gpu=torch.cuda.is_available())
-    except Exception:
-        return None
-
 @st.cache_resource(show_spinner=False)
 def init_iris_engine():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -260,10 +249,7 @@ def init_iris_engine():
     except Exception:
         status["yolo"] = "Offline"
 
-    # 3. EasyOCR Status
-    status["ocr"] = "Active"
-
-    # 4. OpenAI CLIP ViT-B/32 & Fine-Tuned Head
+    # 3. OpenAI CLIP ViT-B/32 & Fine-Tuned Head
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
     model_dir = "output"
@@ -316,7 +302,6 @@ def init_iris_engine():
         "resnet": frozen_resnet,
         "text_model": frozen_text_model,
         "yolo": yolo_model,
-        "reader": None,
         "clip_processor": clip_processor,
         "clip_base": clip_base_model,
         "clip_custom": custom_clip,
@@ -398,8 +383,8 @@ with st.sidebar:
                 <span style="color:#FFFFFF;">YOLOv8 Nano</span>
             </div>
             <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                <span style="color:#71717A;">TYPOGRAPHY:</span>
-                <span style="color:#FFFFFF;">EasyOCR EN</span>
+                <span style="color:#71717A;">ALIGNMENT:</span>
+                <span style="color:#FFFFFF;">Cross-Modal Attention</span>
             </div>
             <div style="display:flex; justify-content:space-between;">
                 <span style="color:#71717A;">ENGINE:</span>
@@ -464,11 +449,11 @@ with col_in:
             st.markdown(f"<div style='font-family:monospace; font-size:0.72rem; color:#71717A; margin-top:6px;'>IMAGE BUFFER: {w}x{h} PX // RGB</div>", unsafe_allow_html=True)
 
         st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='meta-tag'>02 // CAPTION OVERRIDE (OPTIONAL)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='meta-tag'>02 // MEME TEXT / CAPTION</div>", unsafe_allow_html=True)
         caption_input = st.text_input(
-            "Caption Override",
+            "Meme Text",
             value=preset_caption,
-            placeholder="Leave blank for autonomous in-image OCR...",
+            placeholder="Enter text from meme or select benchmark sample...",
             label_visibility="collapsed"
         )
 
@@ -482,44 +467,32 @@ with col_out:
             st.markdown("""
                 Drop an image or select a benchmark sample to execute real-time multimodal safety analysis:
                 
-                * **EasyOCR Engine**: Reads text embedded in meme typography.
+                * **Semantic Ingestion**: Parses textual content across multimodal tokens.
                 * **YOLOv8 Grounding**: Pinpoints physical objects and injects contextual tokens.
-                * **Vision-Language Synthesis**: Evaluates bimodal alignment using OpenAI CLIP.
+                * **Vision-Language Synthesis**: Evaluates bimodal alignment using fine-tuned OpenAI CLIP.
             """)
     else:
         if run_btn or sample_select != "Custom Upload":
-            with st.spinner("Analyzing cross-modal features..."):
-                # 1. OCR Extraction
-                if not caption_input.strip():
-                    reader = get_easyocr_reader()
-                    if reader is not None:
+            clean_text = caption_input.strip()
+            if not clean_text:
+                st.warning("Please enter the meme text in the caption field above to run analysis.")
+            else:
+                with st.spinner("Analyzing cross-modal features..."):
+                    # 1. YOLO Detection
+                    detected_objs = []
+                    if engine["yolo"] is not None:
                         try:
-                            ocr_res = reader.readtext(np.array(image_to_process))
-                            clean_text = " ".join([t for _, t, _ in ocr_res]).strip()
-                            if not clean_text:
-                                clean_text = "[No text detected by OCR]"
+                            yolo_res = engine["yolo"](image_to_process, verbose=False)[0]
+                            labels = [yolo_res.names[int(b.cls)] for b in yolo_res.boxes]
+                            detected_objs = list(set(labels))
                         except Exception:
-                            clean_text = "[OCR error - provide text manually]"
-                    else:
-                        clean_text = "[OCR offline - provide text manually]"
-                else:
-                    clean_text = caption_input.strip()
+                            detected_objs = []
 
-                # 2. YOLO Detection
-                detected_objs = []
-                if engine["yolo"] is not None:
-                    try:
-                        yolo_res = engine["yolo"](image_to_process, verbose=False)[0]
-                        labels = [yolo_res.names[int(b.cls)] for b in yolo_res.boxes]
-                        detected_objs = list(set(labels))
-                    except Exception:
-                        detected_objs = []
-
-                factor_str = (
-                    " [detected objects: " + ", ".join(detected_objs) + "]"
-                    if detected_objs else " [detected objects: none]"
-                )
-                augmented_prompt = clean_text + factor_str
+                    factor_str = (
+                        " [detected objects: " + ", ".join(detected_objs) + "]"
+                        if detected_objs else " [detected objects: none]"
+                    )
+                    augmented_prompt = clean_text + factor_str
 
                 # 3. Model Inference
                 img_t = transform(image_to_process).unsqueeze(0).to(device)
