@@ -23,8 +23,8 @@ sys.path.append('.')
 sys.path.append('src')
 
 try:
-    from src.train_clip import clipclassifier
-except ImportError:
+    from src.train_clip import CLIPClassifier as clipclassifier
+except Exception:
     clipclassifier = None
 
 # -----------------------------------------------------------------------------
