@@ -1,0 +1,14 @@
+torch
+torchvision
+sentence-transformers
+transformers
+scikit-learn
+pandas
+pillow
+streamlit
+matplotlib
+seaborn
+tqdm
+ultralytics
+easyocr
+wordcloud

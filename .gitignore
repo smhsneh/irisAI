@@ -1,0 +1,32 @@
+# python bytecode & environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# model outputs, weights, plots & pickles
+output/
+*.pth
+*.pkl
+yolov8n.pt
+
+# raw dataset media
+data/img/
+img/
+
+# jupyter & colab checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# os & temporary logs
+.DS_Store
+Thumbs.db
+logs.txt
+
+# node / tunnel temporary artifacts
+node_modules/
+package-lock.json
+package.json
