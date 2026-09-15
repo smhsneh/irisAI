@@ -12,3 +12,4 @@ tqdm
 ultralytics
 easyocr
 wordcloud
+huggingface-hub

@@ -267,11 +267,28 @@ def init_iris_engine():
     clip_base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
     clip_base_model.eval()
 
+    model_dir = "output"
+    model_path = os.path.join(model_dir, "best_clip_model.pth")
+    if not os.path.exists(model_path):
+        os.makedirs(model_dir, exist_ok=True)
+        try:
+            from huggingface_hub import hf_hub_download
+            hf_hub_download(repo_id="smhsneh/irisAI", filename="best_clip_model.pth", local_dir=model_dir)
+        except Exception:
+            try:
+                import urllib.request
+                urllib.request.urlretrieve(
+                    "https://huggingface.co/smhsneh/irisAI/resolve/main/best_clip_model.pth",
+                    model_path
+                )
+            except Exception:
+                pass
+
     custom_clip = None
-    if clipclassifier is not None and os.path.exists("output/best_clip_model.pth"):
+    if clipclassifier is not None and os.path.exists(model_path):
         try:
             custom_clip = clipclassifier()
-            custom_clip.load_state_dict(torch.load("output/best_clip_model.pth", map_location=device, weights_only=True))
+            custom_clip.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
             custom_clip.to(device)
             custom_clip.eval()
             status["clip"] = "Fine-Tuned Head Active"
