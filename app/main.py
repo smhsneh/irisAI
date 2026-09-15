@@ -220,31 +220,38 @@ st.markdown("""
 # Core Engine & Model Caching
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=False)
+def get_easyocr_reader():
+    try:
+        import easyocr
+        return easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+    except Exception:
+        return None
+
+@st.cache_resource(show_spinner=False)
 def init_iris_engine():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     status = {}
 
-    # 1. Classical Baselines
+    # 1. Classical Baselines (only loaded if weights exist)
     img_clf, txt_clf = None, None
+    frozen_resnet = None
+    frozen_text_model = None
+
     if os.path.exists("output/image_baseline_logreg.pkl") and os.path.exists("output/text_baseline_logreg.pkl"):
         try:
             img_clf = joblib.load("output/image_baseline_logreg.pkl")
             txt_clf = joblib.load("output/text_baseline_logreg.pkl")
             status["baselines"] = "Active"
+            frozen_resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+            frozen_resnet = torch.nn.Sequential(*list(frozen_resnet.children())[:-1]).to(device)
+            frozen_resnet.eval()
+            frozen_text_model = SentenceTransformer('all-MiniLM-L6-v2')
         except Exception:
             status["baselines"] = "Zero-Shot Fallback"
     else:
         status["baselines"] = "Zero-Shot Fallback"
 
-    # 2. ResNet-50 Feature Extractor
-    frozen_resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-    frozen_resnet = torch.nn.Sequential(*list(frozen_resnet.children())[:-1]).to(device)
-    frozen_resnet.eval()
-
-    # 3. Sentence-MiniLM
-    frozen_text_model = SentenceTransformer('all-MiniLM-L6-v2')
-
-    # 4. YOLOv8
+    # 2. YOLOv8
     yolo_model = None
     try:
         from ultralytics import YOLO
@@ -253,19 +260,11 @@ def init_iris_engine():
     except Exception:
         status["yolo"] = "Offline"
 
-    # 5. EasyOCR
-    reader = None
-    try:
-        import easyocr
-        reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
-        status["ocr"] = "Active"
-    except Exception:
-        status["ocr"] = "Offline"
+    # 3. EasyOCR Status
+    status["ocr"] = "Active"
 
-    # 6. OpenAI CLIP ViT-B/32
+    # 4. OpenAI CLIP ViT-B/32 & Fine-Tuned Head
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-    clip_base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-    clip_base_model.eval()
 
     model_dir = "output"
     model_path = os.path.join(model_dir, "best_clip_model.pth")
@@ -285,17 +284,30 @@ def init_iris_engine():
                 pass
 
     custom_clip = None
+    clip_base_model = None
+
     if clipclassifier is not None and os.path.exists(model_path):
         try:
             custom_clip = clipclassifier()
-            custom_clip.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+            try:
+                weights = torch.load(model_path, map_location=device, weights_only=True)
+            except Exception:
+                weights = torch.load(model_path, map_location=device)
+            custom_clip.load_state_dict(weights)
             custom_clip.to(device)
             custom_clip.eval()
+            clip_base_model = custom_clip.clip
             status["clip"] = "Fine-Tuned Head Active"
         except Exception:
+            custom_clip = None
+
+    if clip_base_model is None:
+        try:
+            clip_base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+            clip_base_model.eval()
             status["clip"] = "Zero-Shot Fallback"
-    else:
-        status["clip"] = "Zero-Shot Fallback"
+        except Exception:
+            status["clip"] = "Offline"
 
     return {
         "device": device,
@@ -304,7 +316,7 @@ def init_iris_engine():
         "resnet": frozen_resnet,
         "text_model": frozen_text_model,
         "yolo": yolo_model,
-        "reader": reader,
+        "reader": None,
         "clip_processor": clip_processor,
         "clip_base": clip_base_model,
         "clip_custom": custom_clip,
@@ -479,11 +491,15 @@ with col_out:
             with st.spinner("Analyzing cross-modal features..."):
                 # 1. OCR Extraction
                 if not caption_input.strip():
-                    if engine["reader"] is not None:
-                        ocr_res = engine["reader"].readtext(np.array(image_to_process))
-                        clean_text = " ".join([t for _, t, _ in ocr_res]).strip()
-                        if not clean_text:
-                            clean_text = "[No text detected by OCR]"
+                    reader = get_easyocr_reader()
+                    if reader is not None:
+                        try:
+                            ocr_res = reader.readtext(np.array(image_to_process))
+                            clean_text = " ".join([t for _, t, _ in ocr_res]).strip()
+                            if not clean_text:
+                                clean_text = "[No text detected by OCR]"
+                        except Exception:
+                            clean_text = "[OCR error - provide text manually]"
                     else:
                         clean_text = "[OCR offline - provide text manually]"
                 else:
@@ -509,17 +525,23 @@ with col_out:
                 img_t = transform(image_to_process).unsqueeze(0).to(device)
 
                 # Image Baseline
-                with torch.no_grad():
-                    img_f = engine["resnet"](img_t).cpu().numpy().reshape(1, -1)
-                if engine["img_clf"] is not None:
-                    img_risk = float(engine["img_clf"].predict_proba(img_f)[0, 1])
+                if engine["resnet"] is not None and engine["img_clf"] is not None:
+                    try:
+                        with torch.no_grad():
+                            img_f = engine["resnet"](img_t).cpu().numpy().reshape(1, -1)
+                        img_risk = float(engine["img_clf"].predict_proba(img_f)[0, 1])
+                    except Exception:
+                        img_risk = 0.52
                 else:
                     img_risk = 0.52
 
                 # Text Baseline
-                txt_f = engine["text_model"].encode([clean_text], show_progress_bar=False)
-                if engine["txt_clf"] is not None:
-                    txt_risk = float(engine["txt_clf"].predict_proba(txt_f)[0, 1])
+                if engine["text_model"] is not None and engine["txt_clf"] is not None:
+                    try:
+                        txt_f = engine["text_model"].encode([clean_text], show_progress_bar=False)
+                        txt_risk = float(engine["txt_clf"].predict_proba(txt_f)[0, 1])
+                    except Exception:
+                        txt_risk = 0.58
                 else:
                     txt_risk = 0.58
 
