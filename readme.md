@@ -18,7 +18,7 @@
 
 <br/>
 
-**[codebase](https://github.com/smhsneh/irisAI)**
+**[live](https://irisai-smhsneh.streamlit.app/)** &nbsp;·&nbsp; **[weights](https://huggingface.co/smhsneh/irisAI)** &nbsp;·&nbsp; **[codebase](https://github.com/smhsneh/irisAI)**
 
 <br/>
 
