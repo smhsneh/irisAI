@@ -216,6 +216,28 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def extract_meme_text(image):
+    try:
+        import pytesseract
+        text = pytesseract.image_to_string(image).strip()
+        clean = " ".join(text.split())
+        if len(clean) > 2:
+            return clean
+    except Exception:
+        pass
+
+    try:
+        import easyocr
+        reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+        ocr_res = reader.readtext(np.array(image))
+        clean = " ".join([t for _, t, _ in ocr_res]).strip()
+        if len(clean) > 2:
+            return clean
+    except Exception:
+        pass
+
+    return ""
+
 @st.cache_resource(show_spinner=False)
 def init_iris_engine():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -383,8 +405,8 @@ with st.sidebar:
                 <span style="color:#FFFFFF;">YOLOv8 Nano</span>
             </div>
             <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                <span style="color:#71717A;">ALIGNMENT:</span>
-                <span style="color:#FFFFFF;">Cross-Modal Attention</span>
+                <span style="color:#71717A;">TYPOGRAPHY:</span>
+                <span style="color:#FFFFFF;">Autonomous OCR</span>
             </div>
             <div style="display:flex; justify-content:space-between;">
                 <span style="color:#71717A;">ENGINE:</span>
@@ -449,11 +471,11 @@ with col_in:
             st.markdown(f"<div style='font-family:monospace; font-size:0.72rem; color:#71717A; margin-top:6px;'>IMAGE BUFFER: {w}x{h} PX // RGB</div>", unsafe_allow_html=True)
 
         st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='meta-tag'>02 // MEME TEXT / CAPTION</div>", unsafe_allow_html=True)
+        st.markdown("<div class='meta-tag'>02 // IN-IMAGE OCR / TEXT OVERRIDE</div>", unsafe_allow_html=True)
         caption_input = st.text_input(
             "Meme Text",
             value=preset_caption,
-            placeholder="Enter text from meme or select benchmark sample...",
+            placeholder="Autonomous OCR extracts text automatically if left blank...",
             label_visibility="collapsed"
         )
 
@@ -467,32 +489,36 @@ with col_out:
             st.markdown("""
                 Drop an image or select a benchmark sample to execute real-time multimodal safety analysis:
                 
-                * **Semantic Ingestion**: Parses textual content across multimodal tokens.
+                * **Autonomous OCR Engine**: Reads typography embedded in meme images with zero manual input.
                 * **YOLOv8 Grounding**: Pinpoints physical objects and injects contextual tokens.
                 * **Vision-Language Synthesis**: Evaluates bimodal alignment using fine-tuned OpenAI CLIP.
             """)
     else:
         if run_btn or sample_select != "Custom Upload":
-            clean_text = caption_input.strip()
-            if not clean_text:
-                st.warning("Please enter the meme text in the caption field above to run analysis.")
-            else:
-                with st.spinner("Analyzing cross-modal features..."):
-                    # 1. YOLO Detection
-                    detected_objs = []
-                    if engine["yolo"] is not None:
-                        try:
-                            yolo_res = engine["yolo"](image_to_process, verbose=False)[0]
-                            labels = [yolo_res.names[int(b.cls)] for b in yolo_res.boxes]
-                            detected_objs = list(set(labels))
-                        except Exception:
-                            detected_objs = []
+            with st.spinner("Executing multimodal perception & OCR pipeline..."):
+                # Autonomous OCR Extraction (uses manual override if provided, otherwise extracts directly from image)
+                if caption_input.strip():
+                    clean_text = caption_input.strip()
+                else:
+                    clean_text = extract_meme_text(image_to_process)
+                    if not clean_text:
+                        clean_text = "[No text detected by OCR]"
 
-                    factor_str = (
-                        " [detected objects: " + ", ".join(detected_objs) + "]"
-                        if detected_objs else " [detected objects: none]"
-                    )
-                    augmented_prompt = clean_text + factor_str
+                # 1. YOLO Detection
+                detected_objs = []
+                if engine["yolo"] is not None:
+                    try:
+                        yolo_res = engine["yolo"](image_to_process, verbose=False)[0]
+                        labels = [yolo_res.names[int(b.cls)] for b in yolo_res.boxes]
+                        detected_objs = list(set(labels))
+                    except Exception:
+                        detected_objs = []
+
+                factor_str = (
+                    " [detected objects: " + ", ".join(detected_objs) + "]"
+                    if detected_objs else " [detected objects: none]"
+                )
+                augmented_prompt = clean_text + factor_str
 
                 # 3. Model Inference
                 img_t = transform(image_to_process).unsqueeze(0).to(device)
