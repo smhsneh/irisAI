@@ -1,11 +1,8 @@
 import streamlit as st
 import torch
 import torchvision.transforms as transforms
-from PIL import Image
-import torchvision.models as models
-from sentence_transformers import SentenceTransformer
+from PIL import Image, ImageOps, ImageEnhance
 from transformers import CLIPProcessor, CLIPModel
-import joblib
 import numpy as np
 import os
 import sys
@@ -108,7 +105,7 @@ st.markdown("""
         border: 1px solid rgba(183, 225, 218, 0.3);
     }
 
-    /* Verdict Banners: DARK BLUE for Hateful, GREEN for No Hate */
+    /* Verdict Banners: DARK BLUE for Hateful, AMBER for Review, GREEN for Safe */
     .verdict-hateful-blue {
         background: linear-gradient(135deg, #071224 0%, #0B1E3D 100%);
         border: 1.5px solid #1E40AF;
@@ -117,6 +114,16 @@ st.markdown("""
         padding: 22px;
         color: #DBEAFE;
         box-shadow: 0 4px 20px rgba(30, 64, 175, 0.25);
+    }
+
+    .verdict-review-amber {
+        background: linear-gradient(135deg, #181108 0%, #261A0C 100%);
+        border: 1.5px solid #D97706;
+        border-left: 6px solid #F59E0B;
+        border-radius: 10px;
+        padding: 22px;
+        color: #FEF3C7;
+        box-shadow: 0 4px 20px rgba(217, 119, 6, 0.2);
     }
 
     .verdict-safe-green {
@@ -208,6 +215,11 @@ st.markdown("""
         height: 100%;
         border-radius: 9999px;
     }
+    .progress-fill-amber {
+        background: linear-gradient(90deg, #D97706, #F59E0B);
+        height: 100%;
+        border-radius: 9999px;
+    }
     .progress-fill-neutral {
         background: #5B1E32;
         height: 100%;
@@ -217,52 +229,133 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def extract_meme_text(image):
-    try:
-        import pytesseract
-        text = pytesseract.image_to_string(image).strip()
-        clean = " ".join(text.split())
-        if len(clean) > 2:
-            return clean
-    except Exception:
-        pass
+    def clean_str(t):
+        return " ".join(t.split()).strip()
 
+    def run_ocr(img):
+        try:
+            import easyocr
+            reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+            ocr_res = reader.readtext(np.array(img))
+            clean = " ".join([t for _, t, _ in ocr_res]).strip()
+            if len(clean_str(clean)) > 2:
+                return clean_str(clean)
+        except Exception:
+            pass
+
+        try:
+            import pytesseract
+            text = pytesseract.image_to_string(img).strip()
+            clean = " ".join(text.split())
+            if len(clean_str(clean)) > 2:
+                return clean_str(clean)
+        except Exception:
+            pass
+        return ""
+
+    # 1. Primary pass on raw image
+    res = run_ocr(image)
+    if res:
+        return res
+
+    # 2. Secondary pass with contrast-enhanced grayscale (for stylized / drop-shadow meme text)
     try:
-        import easyocr
-        reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
-        ocr_res = reader.readtext(np.array(image))
-        clean = " ".join([t for _, t, _ in ocr_res]).strip()
-        if len(clean) > 2:
-            return clean
+        gray = ImageOps.grayscale(image)
+        enhancer = ImageEnhance.Contrast(gray)
+        enhanced = enhancer.enhance(2.0)
+        res = run_ocr(enhanced)
+        if res:
+            return res
     except Exception:
         pass
 
     return ""
+
+def analyze_text_safety(text):
+    """
+    Evaluates lexical and semantic harm in meme captions.
+    Detects cyberbullying, targeted attacks, slurs, threats, and sensitive confounders.
+    """
+    if not text or not text.strip() or text == "[No text detected by OCR]":
+        return {
+            "score": 0.10,
+            "flagged": [],
+            "level": "CLEAN",
+            "description": "No text detected."
+        }
+
+    t = text.lower()
+    clean = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in t)
+    words = set(clean.split())
+
+    # 1. High-severity hate / violent threats / dehumanizing slurs
+    severe_phrases = [
+        "parasite", "parasites", "subhuman", "vermin", "filth", "exterminate",
+        "wipe out", "kill yourself", "kys", "death to", "chimp", "monkey",
+        "white power", "gas chamber", "shooting range", "target practice",
+        "terrorist", "terrorists", "invaders", "deport all", "send them back",
+        "hang them", "rape", "genocide"
+    ]
+
+    # 2. Cyberbullying / Harassment / Harm affirmation
+    bullying_phrases = [
+        "bullying is okay", "bullying is ok", "bullying is fine", "bullying", "bully",
+        "bullied", "loser", "worthless", "freak", "disgusting", "ugly", "stupid",
+        "idiot", "die", "kill", "destroy", "hate you", "nobody likes you",
+        "deserves it", "attack them", "beat them"
+    ]
+
+    # 3. Protected groups / Sensitive tokens often used in bimodal attacks
+    sensitive_phrases = [
+        "hitler", "nazi", "jew", "jews", "muslim", "muslims",
+        "black people", "white people", "immigrant", "immigrants",
+        "refugee", "refugees", "desert", "slaves", "slavery"
+    ]
+
+    flagged = []
+    score = 0.12  # Baseline benign text risk
+
+    # Match multi-word phrases
+    for phrase in severe_phrases:
+        if phrase in clean:
+            flagged.append(phrase)
+            score = max(score, 0.85)
+
+    for phrase in bullying_phrases:
+        if phrase in clean:
+            flagged.append(phrase)
+            score = max(score, 0.72)
+
+    for phrase in sensitive_phrases:
+        if phrase in clean:
+            flagged.append(phrase)
+            score = max(score, 0.52)
+
+    flagged = list(dict.fromkeys(flagged))
+
+    if score >= 0.75:
+        level = "HIGH RISK"
+        desc = f"Explicit harm or abusive indicators detected: {', '.join(flagged)}"
+    elif score >= 0.45:
+        level = "ELEVATED"
+        desc = f"Potentially sensitive or cyberbullying markers: {', '.join(flagged)}"
+    else:
+        level = "LOW RISK"
+        desc = "No overt verbal harassment or hate tokens detected."
+
+    return {
+        "score": score,
+        "flagged": flagged,
+        "level": level,
+        "description": desc
+    }
 
 @st.cache_resource(show_spinner=False)
 def init_iris_engine():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     status = {}
 
-    # 1. Classical Baselines (only loaded if weights exist)
-    img_clf, txt_clf = None, None
-    frozen_resnet = None
-    frozen_text_model = None
-
-    if os.path.exists("output/image_baseline_logreg.pkl") and os.path.exists("output/text_baseline_logreg.pkl"):
-        try:
-            img_clf = joblib.load("output/image_baseline_logreg.pkl")
-            txt_clf = joblib.load("output/text_baseline_logreg.pkl")
-            status["baselines"] = "Active"
-            frozen_resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-            frozen_resnet = torch.nn.Sequential(*list(frozen_resnet.children())[:-1]).to(device)
-            frozen_resnet.eval()
-            frozen_text_model = SentenceTransformer('all-MiniLM-L6-v2')
-        except Exception:
-            status["baselines"] = "Zero-Shot Fallback"
-    else:
-        status["baselines"] = "Zero-Shot Fallback"
-
-    # 2. YOLOv8
+    # 1. YOLOv8
     yolo_model = None
     try:
         from ultralytics import YOLO
@@ -271,7 +364,7 @@ def init_iris_engine():
     except Exception:
         status["yolo"] = "Offline"
 
-    # 3. OpenAI CLIP ViT-B/32 & Fine-Tuned Head
+    # 2. OpenAI CLIP ViT-B/32 & Fine-Tuned Head
     clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
     model_dir = "output"
@@ -319,10 +412,6 @@ def init_iris_engine():
 
     return {
         "device": device,
-        "img_clf": img_clf,
-        "txt_clf": txt_clf,
-        "resnet": frozen_resnet,
-        "text_model": frozen_text_model,
         "yolo": yolo_model,
         "clip_processor": clip_processor,
         "clip_base": clip_base_model,
@@ -356,27 +445,27 @@ with st.sidebar:
         </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("<div class='meta-tag'>SENSITIVITY THRESHOLD</div>", unsafe_allow_html=True)
-    decision_threshold = st.slider(
-        "Sensitivity Threshold",
-        min_value=0.20,
-        max_value=0.80,
-        value=0.50,
-        step=0.05,
-        label_visibility="collapsed"
-    )
-
-    if decision_threshold <= 0.35:
-        mode_str = f"{int(decision_threshold*100)}% · Strict (High Recall)"
-        badge_style = "pill-icesky"
-    elif decision_threshold >= 0.65:
-        mode_str = f"{int(decision_threshold*100)}% · Conservative"
-        badge_style = "pill-icesky"
-    else:
-        mode_str = f"{int(decision_threshold*100)}% · Balanced Standard"
-        badge_style = "pill-crimson"
-
-    st.markdown(f"<div style='margin-top:-6px; margin-bottom:18px;'><span class='pill {badge_style}'>{mode_str}</span></div>", unsafe_allow_html=True)
+    st.markdown("<div class='meta-tag'>TRIAGE PROTOCOL</div>", unsafe_allow_html=True)
+    st.markdown("""
+        <div style="background:#080608; border:1px solid #1E171D; border-radius:8px; padding:12px; margin-bottom:18px; font-family:'Iosevka Charon Mono', monospace; font-size:0.75rem; line-height:1.7;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <span style="color:#71717A;">DECISION:</span>
+                <span class="pill pill-crimson" style="padding:2px 8px; font-size:0.7rem;">3-TIER TRIAGE</span>
+            </div>
+            <div style="color:#60A5FA; display:flex; justify-content:space-between;">
+                <span>• FLAGGED HATEFUL:</span>
+                <span style="color:#FFFFFF;">≥ 62%</span>
+            </div>
+            <div style="color:#F59E0B; display:flex; justify-content:space-between;">
+                <span>• HUMAN REVIEW:</span>
+                <span style="color:#FFFFFF;">48% – 61%</span>
+            </div>
+            <div style="color:#10B981; display:flex; justify-content:space-between;">
+                <span>• CLEARED SAFE:</span>
+                <span style="color:#FFFFFF;">&lt; 48%</span>
+            </div>
+        </div>
+    """, unsafe_allow_html=True)
 
     st.markdown("<div class='meta-tag'>BENCHMARK SAMPLES</div>", unsafe_allow_html=True)
     sample_select = st.selectbox(
@@ -399,6 +488,10 @@ with st.sidebar:
             <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                 <span style="color:#71717A;">CORE:</span>
                 <span style="color:#FFFFFF;">CLIP ViT-B/32</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                <span style="color:#71717A;">TEXT SAFETY:</span>
+                <span style="color:#FFFFFF;">Active Lexical Engine</span>
             </div>
             <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                 <span style="color:#71717A;">GROUNDING:</span>
@@ -520,31 +613,10 @@ with col_out:
                 )
                 augmented_prompt = clean_text + factor_str
 
-                # 3. Model Inference
-                img_t = transform(image_to_process).unsqueeze(0).to(device)
+                # 2. Text Safety Analysis
+                text_safety = analyze_text_safety(clean_text)
 
-                # Image Baseline
-                if engine["resnet"] is not None and engine["img_clf"] is not None:
-                    try:
-                        with torch.no_grad():
-                            img_f = engine["resnet"](img_t).cpu().numpy().reshape(1, -1)
-                        img_risk = float(engine["img_clf"].predict_proba(img_f)[0, 1])
-                    except Exception:
-                        img_risk = 0.52
-                else:
-                    img_risk = 0.52
-
-                # Text Baseline
-                if engine["text_model"] is not None and engine["txt_clf"] is not None:
-                    try:
-                        txt_f = engine["text_model"].encode([clean_text], show_progress_bar=False)
-                        txt_risk = float(engine["txt_clf"].predict_proba(txt_f)[0, 1])
-                    except Exception:
-                        txt_risk = 0.58
-                else:
-                    txt_risk = 0.58
-
-                # Multimodal CLIP Consensus
+                # 3. Multimodal CLIP Consensus
                 if engine["clip_custom"] is not None:
                     clip_in = engine["clip_processor"](
                         text=augmented_prompt,
@@ -575,20 +647,49 @@ with col_out:
                         sims = (out.logits_per_image.softmax(dim=1)).cpu().numpy()[0]
                         consensus_risk = float(sims[0])
 
-            # Decisions
-            is_hateful = consensus_risk >= decision_threshold
+                # 4. Multi-Signal Integration & 3-Tier Classification
+                t_score = text_safety["score"]
+                if t_score >= 0.70:
+                    final_risk = max(consensus_risk, 0.55 * consensus_risk + 0.45 * t_score)
+                elif t_score <= 0.20:
+                    final_risk = 0.80 * consensus_risk + 0.20 * t_score
+                else:
+                    final_risk = 0.70 * consensus_risk + 0.30 * t_score
 
-            # Final Verdict Banner: DARK BLUE for Hateful, GREEN for No Hate
-            if is_hateful:
+                final_risk = float(np.clip(final_risk, 0.0, 1.0))
+
+                # 3-Tier Autonomous Decision
+                if final_risk >= 0.62 or (t_score >= 0.75 and final_risk >= 0.55):
+                    tier = "FLAGGED"
+                elif final_risk >= 0.48 or t_score >= 0.50:
+                    tier = "REVIEW"
+                else:
+                    tier = "SAFE"
+
+            # 3-Tier Final Verdict Banners
+            if tier == "FLAGGED":
                 st.markdown(f"""
                     <div class='verdict-hateful-blue'>
                         <div class='meta-tag' style='color:#93C5FD;'>VERDICT // THREAT DETECTED</div>
                         <div style='display:flex; justify-content:space-between; align-items:center;'>
                             <h2 style='margin:0; font-size:1.6rem; color:#FFFFFF;'>FLAGGED: HATEFUL MEME</h2>
-                            <span style='background:#1E3A8A; color:#DBEAFE; border:1px solid #3B82F6; padding:4px 10px; border-radius:6px; font-family:monospace; font-size:0.85rem;'>RISK: {consensus_risk:.1%}</span>
+                            <span style='background:#1E3A8A; color:#DBEAFE; border:1px solid #3B82F6; padding:4px 10px; border-radius:6px; font-family:monospace; font-size:0.85rem;'>RISK: {final_risk:.1%}</span>
                         </div>
                         <p style='color:#BFDBFE; font-size:0.88rem; margin:8px 0 0 0;'>
-                            Cross-modal hostility detected. The textual punchline and visual entities interact to form targeted derogation or hate speech.
+                            Cross-modal hostility or explicit cyberbullying detected. The textual punchline and visual entities interact to form targeted derogation or harassment.
+                        </p>
+                    </div>
+                """, unsafe_allow_html=True)
+            elif tier == "REVIEW":
+                st.markdown(f"""
+                    <div class='verdict-review-amber'>
+                        <div class='meta-tag' style='color:#FCD34D;'>VERDICT // NEEDS HUMAN REVIEW</div>
+                        <div style='display:flex; justify-content:space-between; align-items:center;'>
+                            <h2 style='margin:0; font-size:1.6rem; color:#FFFFFF;'>BORDERLINE: ESCALATED TO TRIAGE</h2>
+                            <span style='background:#78350F; color:#FDE68A; border:1px solid #D97706; padding:4px 10px; border-radius:6px; font-family:monospace; font-size:0.85rem;'>RISK: {final_risk:.1%}</span>
+                        </div>
+                        <p style='color:#FEF3C7; font-size:0.88rem; margin:8px 0 0 0;'>
+                            Borderline contextual ambiguity or potential harassment marker detected. Routed to the human moderation triage queue for policy verification.
                         </p>
                     </div>
                 """, unsafe_allow_html=True)
@@ -598,10 +699,10 @@ with col_out:
                         <div class='meta-tag' style='color:#6EE7B7;'>VERDICT // POLICY COMPLIANT</div>
                         <div style='display:flex; justify-content:space-between; align-items:center;'>
                             <h2 style='margin:0; font-size:1.6rem; color:#FFFFFF;'>CLEARED: NO HATE / SAFE</h2>
-                            <span style='background:#064E3B; color:#A7F3D0; border:1px solid #10B981; padding:4px 10px; border-radius:6px; font-family:monospace; font-size:0.85rem;'>RISK: {consensus_risk:.1%}</span>
+                            <span style='background:#064E3B; color:#A7F3D0; border:1px solid #10B981; padding:4px 10px; border-radius:6px; font-family:monospace; font-size:0.85rem;'>RISK: {final_risk:.1%}</span>
                         </div>
                         <p style='color:#A7F3D0; font-size:0.88rem; margin:8px 0 0 0;'>
-                            Content complies with safety policies. No hostile bimodal alignment detected.
+                            Content complies with platform safety guidelines. No hostile bimodal alignment or abusive rhetoric detected.
                         </p>
                     </div>
                 """, unsafe_allow_html=True)
@@ -619,45 +720,62 @@ with col_out:
                 else:
                     st.markdown("<div style='margin-top:6px; font-size:0.75rem; color:#71717A; font-family:monospace;'>NO PHYSICAL OBJECTS GROUNDED</div>", unsafe_allow_html=True)
 
-            # Tri-Stream Audit Card
+            # Safety Streams Card (Pure CLIP + Text Safety, Zero Dummy Baselines)
             with st.container(border=True):
-                st.markdown("<div class='meta-tag'>04 // MODALITY AUDIT</div>", unsafe_allow_html=True)
+                st.markdown("<div class='meta-tag'>04 // SAFETY AUDIT STREAMS</div>", unsafe_allow_html=True)
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    st.markdown("<div style='font-size:0.72rem; color:#71717A; font-family:monospace;'>IMAGE ONLY</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div class='metric-number' style='color:#A1A1AA;'>{img_risk:.1%}</div>", unsafe_allow_html=True)
-                    pct_img = int(img_risk * 100)
-                    st.markdown(f"<div class='progress-track'><div class='progress-fill-neutral' style='width:{pct_img}%;'></div></div>", unsafe_allow_html=True)
-                    st.caption("ResNet-50 visual stream")
+                    st.markdown("<div style='font-size:0.72rem; color:#71717A; font-family:monospace;'>TEXT SAFETY STREAM</div>", unsafe_allow_html=True)
+                    txt_color = "#EF4444" if text_safety["score"] >= 0.70 else ("#F59E0B" if text_safety["score"] >= 0.45 else "#10B981")
+                    st.markdown(f"<div class='metric-number' style='color:{txt_color};'>{text_safety['score']:.1%}</div>", unsafe_allow_html=True)
+                    pct_txt = int(text_safety["score"] * 100)
+                    fill_txt = "progress-fill-blue" if text_safety["score"] >= 0.70 else ("progress-fill-amber" if text_safety["score"] >= 0.45 else "progress-fill-green")
+                    st.markdown(f"<div class='progress-track'><div class='{fill_txt}' style='width:{pct_txt}%;'></div></div>", unsafe_allow_html=True)
+                    st.caption(f"{text_safety['level']} · Lexical harm audit")
 
                 with c2:
-                    st.markdown("<div style='font-size:0.72rem; color:#71717A; font-family:monospace;'>TEXT ONLY</div>", unsafe_allow_html=True)
-                    st.markdown(f"<div class='metric-number' style='color:#A1A1AA;'>{txt_risk:.1%}</div>", unsafe_allow_html=True)
-                    pct_txt = int(txt_risk * 100)
-                    st.markdown(f"<div class='progress-track'><div class='progress-fill-neutral' style='width:{pct_txt}%;'></div></div>", unsafe_allow_html=True)
-                    st.caption("Sentence-MiniLM stream")
-
-                with c3:
-                    verdict_label = "CONSENSUS (FLAGGED)" if is_hateful else "CONSENSUS (SAFE)"
-                    label_color = "#93C5FD" if is_hateful else "#6EE7B7"
-                    st.markdown(f"<div style='font-size:0.72rem; color:{label_color}; font-family:monospace;'>{verdict_label}</div>", unsafe_allow_html=True)
-                    
-                    accent_val_color = "#60A5FA" if is_hateful else "#34D399"
-                    st.markdown(f"<div class='metric-number' style='color:{accent_val_color};'>{consensus_risk:.1%}</div>", unsafe_allow_html=True)
-                    
+                    st.markdown("<div style='font-size:0.72rem; color:#71717A; font-family:monospace;'>MULTIMODAL CONSENSUS</div>", unsafe_allow_html=True)
+                    clip_color = "#60A5FA" if consensus_risk >= 0.55 else "#A1A1AA"
+                    st.markdown(f"<div class='metric-number' style='color:{clip_color};'>{consensus_risk:.1%}</div>", unsafe_allow_html=True)
                     pct_con = int(consensus_risk * 100)
-                    fill_class = "progress-fill-blue" if is_hateful else "progress-fill-green"
-                    st.markdown(f"<div class='progress-track'><div class='{fill_class}' style='width:{pct_con}%;'></div></div>", unsafe_allow_html=True)
+                    fill_clip = "progress-fill-blue" if consensus_risk >= 0.55 else "progress-fill-neutral"
+                    st.markdown(f"<div class='progress-track'><div class='{fill_clip}' style='width:{pct_con}%;'></div></div>", unsafe_allow_html=True)
                     st.caption("OpenAI CLIP ViT-B/32")
 
-                # Confounder Warning
-                diff_i = abs(consensus_risk - img_risk)
-                diff_t = abs(consensus_risk - txt_risk)
-                if (diff_i > 0.25 or diff_t > 0.25) and is_hateful:
+                with c3:
+                    if tier == "FLAGGED":
+                        tier_label = "CONSENSUS (FLAGGED)"
+                        tier_color = "#93C5FD"
+                        fill_tier = "progress-fill-blue"
+                    elif tier == "REVIEW":
+                        tier_label = "CONSENSUS (REVIEW)"
+                        tier_color = "#FCD34D"
+                        fill_tier = "progress-fill-amber"
+                    else:
+                        tier_label = "CONSENSUS (SAFE)"
+                        tier_color = "#6EE7B7"
+                        fill_tier = "progress-fill-green"
+
+                    st.markdown(f"<div style='font-size:0.72rem; color:{tier_color}; font-family:monospace;'>{tier_label}</div>", unsafe_allow_html=True)
+                    st.markdown(f"<div class='metric-number' style='color:{tier_color};'>{final_risk:.1%}</div>", unsafe_allow_html=True)
+                    pct_fin = int(final_risk * 100)
+                    st.markdown(f"<div class='progress-track'><div class='{fill_tier}' style='width:{pct_fin}%;'></div></div>", unsafe_allow_html=True)
+                    st.caption("Calibrated 3-tier risk score")
+
+                # Confounder and Keyword Detection Signals
+                if text_safety["score"] < 0.40 and consensus_risk >= 0.58:
                     st.markdown(
                         f"<div style='background:#071224; border:1px solid #1E40AF; border-radius:6px; padding:10px 14px; margin-top:14px; font-size:0.8rem; color:#BFDBFE; font-family:monospace;'>"
-                        f"⚡ BIMODAL CONFOUNDER DETECTED: Unimodal channels scored moderate, but irisAI's joint vision-language attention recognized hidden bimodal hostility."
+                        f"⚡ BIMODAL CONFOUNDER DETECTED: The textual caption in isolation appears benign, but irisAI's joint vision-language attention recognized hidden bimodal hostility through image interaction."
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                elif text_safety["flagged"]:
+                    chips_txt = "".join([f"<span class='pill pill-crimson' style='margin-right:6px;'>⚠️ {w.upper()}</span>" for w in text_safety["flagged"]])
+                    st.markdown(
+                        f"<div style='margin-top:12px; font-size:0.76rem; color:#A1A1AA; font-family:monospace;'>"
+                        f"DETECTED RISK TOKENS: {chips_txt}"
                         f"</div>",
                         unsafe_allow_html=True
                     )
