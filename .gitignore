@@ -11,11 +11,14 @@ ENV/
 output/
 *.pth
 *.pkl
+*.pt
 yolov8n.pt
 
-# raw dataset media
+# raw dataset media & archives
 data/img/
 img/
+dev_pack/
+*.zip
 
 # jupyter & colab checkpoints
 .ipynb_checkpoints/
