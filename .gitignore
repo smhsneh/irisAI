@@ -10,6 +10,8 @@ ENV/
 # model outputs, weights, plots & pickles
 output/
 *.pth
+!weights/*.pth
+!deploy/hf_space/weights/*.pth
 *.pkl
 *.pt
 yolov8n.pt

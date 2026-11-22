@@ -1,8 +1,6 @@
 import streamlit as st
 import torch
-import torchvision.transforms as transforms
 from PIL import Image, ImageOps, ImageEnhance
-from transformers import CLIPProcessor, CLIPModel
 import numpy as np
 import os
 import sys
@@ -15,14 +13,44 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Ensure project modules can be loaded
-sys.path.append('.')
-sys.path.append('src')
+# Ensure project modules and dependencies can be loaded reliably
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PARENT_DIR = os.path.dirname(_CURRENT_DIR)
+_ROOT_DIR = os.path.dirname(_PARENT_DIR)
 
-try:
-    from src.train_clip import CLIPClassifier as clipclassifier
-except Exception:
-    clipclassifier = None
+for _p in [_ROOT_DIR, _PARENT_DIR, _CURRENT_DIR, os.path.abspath(".")]:
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from src.iris_inference import (
+    load_models, predict, REVIEW_LOW, FLAG_HIGH, TEMPERATURE
+)
+
+def find_weights_dir():
+    candidates = [
+        os.path.join(_PARENT_DIR, "weights"),
+        os.path.join(_ROOT_DIR, "weights"),
+        os.path.abspath("weights"),
+        os.path.join(_CURRENT_DIR, "weights"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c) and any(f.endswith(".pth") for f in os.listdir(c)):
+            return c
+    return candidates[0]
+
+WEIGHTS_DIR = find_weights_dir()
+
+def find_sample_image(filename):
+    candidates = [
+        os.path.join(_CURRENT_DIR, "samples", filename),
+        os.path.join(_ROOT_DIR, "app", "samples", filename),
+        os.path.join("app", "samples", filename),
+        os.path.join("data", "img", filename),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
 
 # -----------------------------------------------------------------------------
 # Color Palette: Plum Noir (#351E28), Crimson Violet (#5B1E32), Ice Sky (#B7E1DA)
@@ -228,14 +256,19 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_resource(show_spinner=False)
+def get_ocr_reader():
+    import easyocr
+    return easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+
+
 def extract_meme_text(image):
     def clean_str(t):
         return " ".join(t.split()).strip()
 
     def run_ocr(img):
         try:
-            import easyocr
-            reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+            reader = get_ocr_reader()
             ocr_res = reader.readtext(np.array(img))
             clean = " ".join([t for _, t, _ in ocr_res]).strip()
             if len(clean_str(clean)) > 2:
@@ -350,83 +383,22 @@ def analyze_text_safety(text):
         "description": desc
     }
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner="Loading CLIP-Large, YOLO and the Bilinear heads (first run downloads about 2 GB)...")
 def init_iris_engine():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    status = {}
+    from ultralytics import YOLO
+    engine = load_models(weights_dir=WEIGHTS_DIR, device=device)
+    engine["yolo"] = YOLO('yolov8n.pt')
+    return engine
 
-    # 1. YOLOv8
-    yolo_model = None
-    try:
-        from ultralytics import YOLO
-        yolo_model = YOLO('yolov8n.pt')
-        status["yolo"] = "Active"
-    except Exception:
-        status["yolo"] = "Offline"
 
-    # 2. OpenAI CLIP ViT-B/32 & Fine-Tuned Head
-    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-
-    model_dir = "output"
-    model_path = os.path.join(model_dir, "best_clip_model.pth")
-    if not os.path.exists(model_path):
-        os.makedirs(model_dir, exist_ok=True)
-        try:
-            from huggingface_hub import hf_hub_download
-            hf_hub_download(repo_id="smhsneh/irisAI", filename="best_clip_model.pth", local_dir=model_dir)
-        except Exception:
-            try:
-                import urllib.request
-                urllib.request.urlretrieve(
-                    "https://huggingface.co/smhsneh/irisAI/resolve/main/best_clip_model.pth",
-                    model_path
-                )
-            except Exception:
-                pass
-
-    custom_clip = None
-    clip_base_model = None
-
-    if clipclassifier is not None and os.path.exists(model_path):
-        try:
-            custom_clip = clipclassifier()
-            try:
-                weights = torch.load(model_path, map_location=device, weights_only=True)
-            except Exception:
-                weights = torch.load(model_path, map_location=device)
-            custom_clip.load_state_dict(weights)
-            custom_clip.to(device)
-            custom_clip.eval()
-            clip_base_model = custom_clip.clip
-            status["clip"] = "Fine-Tuned Head Active"
-        except Exception:
-            custom_clip = None
-
-    if clip_base_model is None:
-        try:
-            clip_base_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-            clip_base_model.eval()
-            status["clip"] = "Zero-Shot Fallback"
-        except Exception:
-            status["clip"] = "Offline"
-
-    return {
-        "device": device,
-        "yolo": yolo_model,
-        "clip_processor": clip_processor,
-        "clip_base": clip_base_model,
-        "clip_custom": custom_clip,
-        "status": status
-    }
-
-engine = init_iris_engine()
+try:
+    engine = init_iris_engine()
+except Exception as exc:  # no silent fallback to another model
+    st.error("Model failed to load. The app will not substitute a different model.")
+    st.exception(exc)
+    st.stop()
 device = engine["device"]
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
 
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
@@ -454,15 +426,15 @@ with st.sidebar:
             </div>
             <div style="color:#60A5FA; display:flex; justify-content:space-between;">
                 <span>• FLAGGED HATEFUL:</span>
-                <span style="color:#FFFFFF;">≥ 62%</span>
+                <span style="color:#FFFFFF;">≥ 60%</span>
             </div>
             <div style="color:#F59E0B; display:flex; justify-content:space-between;">
                 <span>• HUMAN REVIEW:</span>
-                <span style="color:#FFFFFF;">48% – 61%</span>
+                <span style="color:#FFFFFF;">40% – 59%</span>
             </div>
             <div style="color:#10B981; display:flex; justify-content:space-between;">
                 <span>• CLEARED SAFE:</span>
-                <span style="color:#FFFFFF;">&lt; 48%</span>
+                <span style="color:#FFFFFF;">&lt; 40%</span>
             </div>
         </div>
     """, unsafe_allow_html=True)
@@ -487,7 +459,7 @@ with st.sidebar:
         <div style="background:#09070A; border:1px solid #1E171D; border-radius:8px; padding:12px; font-size:0.76rem; font-family:'Iosevka Charon Mono', monospace; line-height:1.7; color:#A1A1AA;">
             <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                 <span style="color:#71717A;">CORE:</span>
-                <span style="color:#FFFFFF;">CLIP ViT-B/32</span>
+                <span style="color:#FFFFFF;">CLIP ViT-L/14 + Bilinear</span>
             </div>
             <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                 <span style="color:#71717A;">TEXT SAFETY:</span>
@@ -525,6 +497,12 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
+st.caption(
+    "Research demo. Dev AUROC about 0.78 on 500 memes (Hateful Memes benchmark); "
+    "the model makes mistakes and must not be used for real moderation decisions. "
+    "Content may be offensive."
+)
+
 # -----------------------------------------------------------------------------
 # Product Workspace (No Empty Placeholder Divs)
 # -----------------------------------------------------------------------------
@@ -538,17 +516,17 @@ with col_in:
         st.markdown("<div class='meta-tag'>01 // INGESTION</div>", unsafe_allow_html=True)
 
         if sample_select == "Sample 1: Benign Confounder (Safe with sensitive word)":
-            p_path = "app/samples/82403.png" if os.path.exists("app/samples/82403.png") else "data/img/82403.png"
+            p_path = find_sample_image("82403.png")
             preset_caption = "everybody loves chocolate chip cookies, even hitler"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
         elif sample_select == "Sample 2: Multimodal Hate (Benign text + hostile image)":
-            p_path = "app/samples/08291.png" if os.path.exists("app/samples/08291.png") else "data/img/08291.png"
+            p_path = find_sample_image("08291.png")
             preset_caption = "white people is this a shooting range"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
         elif sample_select == "Sample 3: Subtle Threat (Contextual objects)":
-            p_path = "app/samples/83745.png" if os.path.exists("app/samples/83745.png") else "data/img/83745.png"
+            p_path = find_sample_image("83745.png")
             preset_caption = "it is time.. to send these parasites back to the desert"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
@@ -616,55 +594,18 @@ with col_out:
                 # 2. Text Safety Analysis
                 text_safety = analyze_text_safety(clean_text)
 
-                # 3. Multimodal CLIP Consensus
-                if engine["clip_custom"] is not None:
-                    clip_in = engine["clip_processor"](
-                        text=augmented_prompt,
-                        images=image_to_process,
-                        return_tensors="pt",
-                        padding="max_length",
-                        truncation=True,
-                        max_length=77
-                    )
-                    p_val = clip_in['pixel_values'].to(device)
-                    i_ids = clip_in['input_ids'].to(device)
-                    a_mask = clip_in['attention_mask'].to(device)
-                    with torch.no_grad():
-                        logits = engine["clip_custom"](p_val, i_ids, a_mask)
-                        consensus_risk = float(torch.sigmoid(logits).item())
-                else:
-                    clip_in = engine["clip_processor"](
-                        text=[
-                            "a hateful derogatory offensive meme cyberbullying attacking people",
-                            "a harmless benign safe wholesome funny internet meme"
-                        ],
-                        images=image_to_process,
-                        return_tensors="pt",
-                        padding=True
-                    ).to(device)
-                    with torch.no_grad():
-                        out = engine["clip_base"](**clip_in)
-                        sims = (out.logits_per_image.softmax(dim=1)).cpu().numpy()[0]
-                        consensus_risk = float(sims[0])
+                # 3. Multimodal score: CLIP-Large + 3x Bilinear, temperature-scaled
+                result = predict(engine, image_to_process, augmented_prompt)
+                consensus_risk = result["prob"]
+                final_risk = consensus_risk
+                tier = result["tier"]
 
-                # 4. Multi-Signal Integration & 3-Tier Classification
+                # 4. Lexical safety layer: may only escalate SAFE -> REVIEW (never lowers a tier)
                 t_score = text_safety["score"]
-                if t_score >= 0.70:
-                    final_risk = max(consensus_risk, 0.55 * consensus_risk + 0.45 * t_score)
-                elif t_score <= 0.20:
-                    final_risk = 0.80 * consensus_risk + 0.20 * t_score
-                else:
-                    final_risk = 0.70 * consensus_risk + 0.30 * t_score
-
-                final_risk = float(np.clip(final_risk, 0.0, 1.0))
-
-                # 3-Tier Autonomous Decision
-                if final_risk >= 0.62 or (t_score >= 0.75 and final_risk >= 0.55):
-                    tier = "FLAGGED"
-                elif final_risk >= 0.48 or t_score >= 0.50:
+                lexical_escalated = False
+                if tier == "SAFE" and t_score >= 0.50:
                     tier = "REVIEW"
-                else:
-                    tier = "SAFE"
+                    lexical_escalated = True
 
             # 3-Tier Final Verdict Banners
             if tier == "FLAGGED":
@@ -736,12 +677,12 @@ with col_out:
 
                 with c2:
                     st.markdown("<div style='font-size:0.72rem; color:#71717A; font-family:monospace;'>MULTIMODAL CONSENSUS</div>", unsafe_allow_html=True)
-                    clip_color = "#60A5FA" if consensus_risk >= 0.55 else "#A1A1AA"
+                    clip_color = "#60A5FA" if consensus_risk >= FLAG_HIGH else "#A1A1AA"
                     st.markdown(f"<div class='metric-number' style='color:{clip_color};'>{consensus_risk:.1%}</div>", unsafe_allow_html=True)
                     pct_con = int(consensus_risk * 100)
-                    fill_clip = "progress-fill-blue" if consensus_risk >= 0.55 else "progress-fill-neutral"
+                    fill_clip = "progress-fill-blue" if consensus_risk >= FLAG_HIGH else "progress-fill-neutral"
                     st.markdown(f"<div class='progress-track'><div class='{fill_clip}' style='width:{pct_con}%;'></div></div>", unsafe_allow_html=True)
-                    st.caption("OpenAI CLIP ViT-B/32")
+                    st.caption("CLIP ViT-L/14 · Bilinear head (3 seeds)")
 
                 with c3:
                     if tier == "FLAGGED":
@@ -763,8 +704,11 @@ with col_out:
                     st.markdown(f"<div class='progress-track'><div class='{fill_tier}' style='width:{pct_fin}%;'></div></div>", unsafe_allow_html=True)
                     st.caption("Calibrated 3-tier risk score")
 
+                if lexical_escalated:
+                    st.caption("Escalated to REVIEW by the lexical safety layer (model score alone was below the review cut-off).")
+
                 # Confounder and Keyword Detection Signals
-                if text_safety["score"] < 0.40 and consensus_risk >= 0.58:
+                if text_safety["score"] < 0.40 and consensus_risk >= FLAG_HIGH:
                     st.markdown(
                         f"<div style='background:#071224; border:1px solid #1E40AF; border-radius:6px; padding:10px 14px; margin-top:14px; font-size:0.8rem; color:#BFDBFE; font-family:monospace;'>"
                         f"⚡ BIMODAL CONFOUNDER DETECTED: The textual caption in isolation appears benign, but irisAI's joint vision-language attention recognized hidden bimodal hostility through image interaction."

@@ -57,6 +57,25 @@ def load_models(weights_dir="weights", device="cpu"):
     heads = []
     for seed in SEEDS:
         path = os.path.join(weights_dir, f"bilinear_seed_{seed}.pth")
+        if not os.path.exists(path):
+            alt_candidates = [
+                os.path.join("weights", f"bilinear_seed_{seed}.pth"),
+                os.path.join("deploy", "hf_space", "weights", f"bilinear_seed_{seed}.pth"),
+            ]
+            for ac in alt_candidates:
+                if os.path.exists(ac):
+                    path = ac
+                    break
+        if not os.path.exists(path):
+            try:
+                from huggingface_hub import hf_hub_download
+                path = hf_hub_download(
+                    repo_id="smhsneh/irisAI",
+                    filename=f"weights/bilinear_seed_{seed}.pth",
+                    local_dir=weights_dir
+                )
+            except Exception:
+                pass
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
         head = BilinearFusionHead()
         head.load_state_dict(ckpt["model_state_dict"], strict=True)

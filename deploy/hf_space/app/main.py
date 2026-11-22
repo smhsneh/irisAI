@@ -13,15 +13,44 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Ensure project modules can be loaded
-sys.path.append('.')
-sys.path.append('src')
+# Ensure project modules and dependencies can be loaded reliably
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PARENT_DIR = os.path.dirname(_CURRENT_DIR)
+_ROOT_DIR = os.path.dirname(_PARENT_DIR)
+
+for _p in [_ROOT_DIR, _PARENT_DIR, _CURRENT_DIR, os.path.abspath(".")]:
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from src.iris_inference import (
     load_models, predict, REVIEW_LOW, FLAG_HIGH, TEMPERATURE
 )
 
-WEIGHTS_DIR = "weights"
+def find_weights_dir():
+    candidates = [
+        os.path.join(_PARENT_DIR, "weights"),
+        os.path.join(_ROOT_DIR, "weights"),
+        os.path.abspath("weights"),
+        os.path.join(_CURRENT_DIR, "weights"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c) and any(f.endswith(".pth") for f in os.listdir(c)):
+            return c
+    return candidates[0]
+
+WEIGHTS_DIR = find_weights_dir()
+
+def find_sample_image(filename):
+    candidates = [
+        os.path.join(_CURRENT_DIR, "samples", filename),
+        os.path.join(_ROOT_DIR, "app", "samples", filename),
+        os.path.join("app", "samples", filename),
+        os.path.join("data", "img", filename),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
 
 # -----------------------------------------------------------------------------
 # Color Palette: Plum Noir (#351E28), Crimson Violet (#5B1E32), Ice Sky (#B7E1DA)
@@ -487,17 +516,17 @@ with col_in:
         st.markdown("<div class='meta-tag'>01 // INGESTION</div>", unsafe_allow_html=True)
 
         if sample_select == "Sample 1: Benign Confounder (Safe with sensitive word)":
-            p_path = "app/samples/82403.png" if os.path.exists("app/samples/82403.png") else "data/img/82403.png"
+            p_path = find_sample_image("82403.png")
             preset_caption = "everybody loves chocolate chip cookies, even hitler"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
         elif sample_select == "Sample 2: Multimodal Hate (Benign text + hostile image)":
-            p_path = "app/samples/08291.png" if os.path.exists("app/samples/08291.png") else "data/img/08291.png"
+            p_path = find_sample_image("08291.png")
             preset_caption = "white people is this a shooting range"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')
         elif sample_select == "Sample 3: Subtle Threat (Contextual objects)":
-            p_path = "app/samples/83745.png" if os.path.exists("app/samples/83745.png") else "data/img/83745.png"
+            p_path = find_sample_image("83745.png")
             preset_caption = "it is time.. to send these parasites back to the desert"
             if os.path.exists(p_path):
                 image_to_process = Image.open(p_path).convert('RGB')

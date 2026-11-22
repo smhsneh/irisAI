@@ -1,8 +1,9 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.11.0
-transformers==5.16.1
+torch
+torchvision
+transformers
 ultralytics
 easyocr
 pillow
 numpy
 huggingface-hub
+streamlit
