@@ -48,11 +48,13 @@ def truncate_caption(caption, tokenizer):
 def load_models(weights_dir="weights", device="cpu"):
     """Load CLIP-Large and the three heads. Raises on any mismatch (no silent fallback)."""
     import torch
+    import gc
     from transformers import CLIPModel, CLIPProcessor
     from src.models.advanced_fusion import BilinearFusionHead
 
+    torch.set_grad_enabled(False)
     processor = CLIPProcessor.from_pretrained(MODEL_NAME)
-    clip = CLIPModel.from_pretrained(MODEL_NAME).float().to(device).eval()
+    clip = CLIPModel.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True).to(device).eval()
 
     heads = []
     for seed in SEEDS:
@@ -80,6 +82,7 @@ def load_models(weights_dir="weights", device="cpu"):
         head = BilinearFusionHead()
         head.load_state_dict(ckpt["model_state_dict"], strict=True)
         heads.append(head.to(device).eval())
+    gc.collect()
     return {"processor": processor, "clip": clip, "heads": heads, "device": device}
 
 

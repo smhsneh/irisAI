@@ -267,19 +267,21 @@ def extract_meme_text(image):
         return " ".join(t.split()).strip()
 
     def run_ocr(img):
+        # 1. Primary lightweight OCR (Tesseract in C++, consumes 0 MB PyTorch RAM)
         try:
-            reader = get_ocr_reader()
-            ocr_res = reader.readtext(np.array(img))
-            clean = " ".join([t for _, t, _ in ocr_res]).strip()
+            import pytesseract
+            text = pytesseract.image_to_string(img).strip()
+            clean = " ".join(text.split())
             if len(clean_str(clean)) > 2:
                 return clean_str(clean)
         except Exception:
             pass
 
+        # 2. Secondary fallback: EasyOCR (only if Tesseract yields no text)
         try:
-            import pytesseract
-            text = pytesseract.image_to_string(img).strip()
-            clean = " ".join(text.split())
+            reader = get_ocr_reader()
+            ocr_res = reader.readtext(np.array(img))
+            clean = " ".join([t for _, t, _ in ocr_res]).strip()
             if len(clean_str(clean)) > 2:
                 return clean_str(clean)
         except Exception:
@@ -383,12 +385,15 @@ def analyze_text_safety(text):
         "description": desc
     }
 
-@st.cache_resource(show_spinner="Loading CLIP-Large, YOLO and the Bilinear heads (first run downloads about 2 GB)...")
+@st.cache_resource(show_spinner="Loading CLIP-Large, YOLO and the Bilinear heads...")
 def init_iris_engine():
+    import gc
+    torch.set_grad_enabled(False)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     from ultralytics import YOLO
     engine = load_models(weights_dir=WEIGHTS_DIR, device=device)
     engine["yolo"] = YOLO('yolov8n.pt')
+    gc.collect()
     return engine
 
 
@@ -599,6 +604,8 @@ with col_out:
                 consensus_risk = result["prob"]
                 final_risk = consensus_risk
                 tier = result["tier"]
+                import gc
+                gc.collect()
 
                 # 4. Lexical safety layer: may only escalate SAFE -> REVIEW (never lowers a tier)
                 t_score = text_safety["score"]
